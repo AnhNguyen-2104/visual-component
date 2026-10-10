@@ -1,0 +1,39 @@
+VAR_INPUT
+B_EN | Bit | (Cho phep chay FB, M500 ON moi xu ly day lay)
+bPush | Bit | (Xung lenh day 1 phoi moi, bat canh len)
+bPop | Bit | (Xung lenh lay 1 phoi ra, bat canh len)
+rPushX | FLOAT (Single Precision) | (X tam day vao mm)
+rPushY | FLOAT (Single Precision) | (Y tam day vao mm)
+rPushAng | FLOAT (Single Precision) | (Goc xoay day vao radian)
+rPushE0 | FLOAT (Single Precision) | (Moc E day vao mm)
+
+VAR_OUTPUT
+bOk | Bit | (Bao 1 thao tac day hoac lay vua thanh cong)
+bFull | Bit | (Bao hang day 16 phoi, chan day them)
+bEmpty | Bit | (Bao hang rong 0 phoi, khong lay duoc)
+rPopX | FLOAT (Single Precision) | (X tam vua lay ra mm)
+rPopY | FLOAT (Single Precision) | (Y tam vua lay ra mm)
+rPopAng | FLOAT (Single Precision) | (Goc vua lay ra radian)
+rPopE0 | FLOAT (Single Precision) | (Moc E vua lay ra mm)
+iCnt | Word[Signed] | (So phoi dang cho 0..16)
+
+VAR
+qX | FLOAT (Single Precision)(0..15) | (Mang FIFO 16 o X mm)
+qY | FLOAT (Single Precision)(0..15) | (Mang FIFO 16 o Y mm)
+qAng | FLOAT (Single Precision)(0..15) | (Mang FIFO 16 o goc radian)
+qE | FLOAT (Single Precision)(0..15) | (Mang FIFO 16 o moc E mm)
+iHead | Word[Signed] | (Chi so dau hang 0..15)
+iTail | Word[Signed] | (Chi so duoi hang 0..15)
+bPrevPush | Bit | (Nho canh len cua bPush)
+bPrevPop | Bit | (Nho canh len cua bPop)
+
+INSTANCE MAU (ST chuong trinh chinh, goi FB truoc roi moi doc output sau)
+FB_Queue1(B_EN:=M500, bPush:=M1000, bPop:=M1001, rPushX:=rInX, rPushY:=rInY, rPushAng:=rInAng, rPushE0:=rInE0);
+rGotX:=FB_Queue1.rPopX;
+rGotY:=FB_Queue1.rPopY;
+rGotAng:=FB_Queue1.rPopAng;
+rGotE0:=FB_Queue1.rPopE0;
+bQOk:=FB_Queue1.bOk;
+bQFull:=FB_Queue1.bFull;
+bQEmpty:=FB_Queue1.bEmpty;
+iQCnt:=FB_Queue1.iCnt;
