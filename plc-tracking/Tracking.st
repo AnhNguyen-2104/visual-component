@@ -1,420 +1,354 @@
-(* ========================================================================= *)
-(* TRACKING BOI KEO 4 GOC - Q06UDEH + QD75D4 U0 (Da.2=0x15) + M-CODE       *)
-(* X->T1 Y->T2 Z->T3 | No.1-12: moi goc 3 diem (bay M0/ha M11/nhac M10)    *)
-(* DOC D VAO: D1000 Xcam, D2000 Ycam, D4000 vtoc mm/s, D4010 goc 0.1do     *)
-(* D3000 Zbay, D3001 Zcham 0.1mm, D4002 master mm/phut, D4004 tran Pr.8    *)
-(* RA D 32-bit: D1010/D2010/D3010 cuoi + D1020/D2020/D3020 dau + D4020     *)
-(* D4030 MotionType=1 | M2000 van, M3000 full, M3001 timeout               *)
-(* Y0 PLC READY: giu ON 1 cho duy nhat moi scan (tranh double-coil)        *)
-(* ========================================================================= *)
-
-(* 1. INIT - SM402 xung 1 scan dau sau RUN *)
-IF SM402 OR NOT bInit THEN
-    bInit := TRUE;
-    bPrevTrig := FALSE;
-    rEncDist := 0.0;
-    rBelt := 0.0; rBeltF := 0.0;
-    rAlpha := 1.0;
-    rLeadT := 0.8;
-    iHead := 0; iTail := 0; iCnt := 0;
-    bActive := FALSE;
-    iState := 0; iCorner := 1;
-    rTmove := 0.0; rTdwell := 0.0;
-    rDt := 0.01;
-    rHalfSq := 20.0;
-    rMoveS := 1.0;
-    rDwellS := 0.6;
-    rXMin := 0.0; rXMax := 170.0;
-    rYMin := 0.0; rYMax := 170.0;
-    rZTravel := 10.0;
-    rZGlue := 40.0;
-    rTargX := 0.0; rTargY := 0.0; rTargZ := 10.0;
-    rLastX := 0.0; rLastY := 0.0; rLastZ := 10.0;
-    rTimeoutS := 8.0;
-    bPosTimeout := FALSE;
-    wNo := 1;
-    bStartReq := FALSE; bFired := FALSE; bRunning := FALSE; bMOffReq := FALSE;
-    wMcode := 0; wTmp := 0;
-END_IF;
-
-(* GIU Y0 ON SUOT - CHI 1 CHO DUY NHAT *)
-(* M500 ENABLE TRACKING - ON: reset sach + chay; OFF: dung, giu Y0, tat van *)
-IF M500 AND NOT bPrevEn THEN
-    bInit := FALSE;
-    bActive := FALSE;
-    iState := 0; iCorner := 1; iCnt := 0;
-    iHead := 0; iTail := 0;
-    rEncDist := 0.0; rBeltF := 0.0;
-    rTmove := 0.0; rTdwell := 0.0;
-    bValve := FALSE; bQFull := FALSE; bPosTimeout := FALSE;
-    bFired := FALSE; bRunning := FALSE; bStartReq := FALSE; bMOffReq := FALSE;
-    dTargX_01um := 0; dTargY_01um := 0; dTargZ_01um := 0;
-    dStartX_01um := 0; dStartY_01um := 0; dStartZ_01um := 0;
-    dSpdStg := 0;
-    wMotionType := 0;
-    wNo := 1; wMcode := 0;
-END_IF;
-bPrevEn := M500;
-IF NOT M500 THEN
-    bActive := FALSE;
-    iState := 0;
-    bValve := FALSE;
-    bStartReq := FALSE; bFired := FALSE; bRunning := FALSE;
-END_IF;
-(* CLEAR M TRUOC START - chuan bi Y10 ma X4 con ON thi Cd.7=1 truoc *)
-IF M500 AND NOT bFired AND X4 THEN
-    bMOffReq := TRUE;
-END_IF;
-
-(* 2. DOC D 16-bit VAO THANG *)
-rBelt := INT_TO_REAL(D4000);
-rBeltF := rBeltF + (rBelt - rBeltF) * rAlpha;
-rEncDist := rEncDist + (rBelt * rDt);
-IF D3000 > 0 THEN
-    rZTravel := INT_TO_REAL(D3000) / 10.0;
-ELSE
-    rZTravel := 10.0;
-END_IF;
-IF D3001 > 0 THEN
-    rZGlue := INT_TO_REAL(D3001) / 10.0;
-ELSE
-    rZGlue := 40.0;
-END_IF;
-IF rZTravel < 0.0 THEN rZTravel := 0.0; END_IF;
-IF rZTravel > 50.0 THEN rZTravel := 50.0; END_IF;
-IF rZGlue < 0.0 THEN rZGlue := 0.0; END_IF;
-IF rZGlue > 50.0 THEN rZGlue := 50.0; END_IF;
-
-(* 2b. DOC D4002/D4004 - MASTER VA TRAN *)
-rMaster := INT_TO_REAL(D4002);
-IF rMaster <= 0.0 THEN
-    rMaster := 10000.0;
-END_IF;
-rSpdLim := INT_TO_REAL(D4004);
-IF rSpdLim <= 0.0 THEN
-    rSpdLim := 20000.0;
-END_IF;
-rFly := rMaster * 0.6;
-rDown := rMaster * 0.12;
-rUp := rMaster * 0.3;
-IF rFly > rSpdLim THEN rFly := rSpdLim; END_IF;
-IF rDown > rSpdLim THEN rDown := rSpdLim; END_IF;
-IF rUp > rSpdLim THEN rUp := rSpdLim; END_IF;
-
-(* 2c. DOC M TRUC 1 (Md.25 U0\G808) *)
-FROM(TRUE, H0, K808, K1, wMcode);
-
-(* 3-5. CHI CHAY KHI M500 ON - OFF THI DUNG, GIU Y0 *)
-IF M500 THEN
-    (* 3. PUSH FIFO - DOC D1000/D2000/D4010 VAO *)
-    IF M1000 AND NOT bPrevTrig THEN
-        IF iCnt < 16 THEN
-            qPX[iTail] := INT_TO_REAL(D1000);
-            qPY[iTail] := INT_TO_REAL(D2000);
-            qPAng[iTail] := (INT_TO_REAL(D4010) / 10.0) * 0.0174532925;
-            qPE[iTail] := rEncDist;
-            iTail := (iTail + 1) MOD 16;
-            iCnt := iCnt + 1;
-        ELSE
-            bQFull := TRUE;
-        END_IF;
-    END_IF;
-    bPrevTrig := M1000;
-
-    (* 4. POP + REBASE *)
-    IF (NOT bActive) AND (iCnt > 0) THEN
-        rPartX0 := qPX[iHead];
-        rPartY0 := qPY[iHead];
-        rPartAng := qPAng[iHead];
-        rPartE0 := qPE[iHead];
-        iHead := (iHead + 1) MOD 16;
-        iCnt := iCnt - 1;
-        bActive := TRUE;
-        iCorner := 1;
-        iState := 10;
-    END_IF;
-    IF iCnt < 16 THEN
-        bQFull := FALSE;
-    END_IF;
-    IF (NOT bActive) AND (iCnt = 0) THEN
-        rEncDist := 0.0;
-        rBeltF := 0.0;
-    END_IF;
-
-    (* 5. STATE: BAY(No le M0) -> HA(No M11) -> PHUN -> TAT M -> NHAC(No M10) -> TAT M *)
-    CASE iState OF
-        0:
-            bValve := FALSE;
-            rTargX := 0.0; rTargY := 0.0; rTargZ := rZTravel;
-            rTmove := 0.0;
-            rTdwell := 0.0;
-            IF bActive THEN
-                iState := 10;
-            END_IF;
-        10:
-            bPosTimeout := FALSE;
-            CASE iCorner OF
-                1: rDx0 := 0.0 - rHalfSq; rDy0 := 0.0 - rHalfSq;
-                2: rDx0 := rHalfSq;       rDy0 := 0.0 - rHalfSq;
-                3: rDx0 := rHalfSq;       rDy0 := rHalfSq;
-                4: rDx0 := 0.0 - rHalfSq; rDy0 := rHalfSq;
-            END_CASE;
-
-        COS_E(TRUE, rPartAng, rCosVal);
-        SIN_E(TRUE, rPartAng, rSinVal);
-        rDxRot := (rDx0 * rCosVal) - (rDy0 * rSinVal);
-        rDyRot := (rDx0 * rSinVal) + (rDy0 * rCosVal);
-        rTargX := rPartX0 + (rEncDist - rPartE0) + (rBeltF * rLeadT) + rDxRot;
-        rTargY := rPartY0 + rDyRot;
-        rTargZ := rZTravel;
-        rSpd := rFly;
-        wNo := (iCorner - 1) * 3 + 1;
-        bFired := FALSE; bRunning := FALSE;
-        rTmove := 0.0;
-        iState := 20;
-    20:
-        bValve := FALSE;
-        rTargX := rPartX0 + (rEncDist - rPartE0) + (rBeltF * rLeadT) + rDxRot;
-        rTargZ := rZTravel;
-        rTmove := rTmove + rDt;
-        IF NOT bFired THEN
-            IF X0 AND NOT X8 AND NOT X9 AND NOT XA THEN
-                (* NHIP 1: tinh + ghi toa do/van toc xuong QD75 - chua RUN *)
-                wAddrX := 2006 + (wNo - 1) * 10;
-                wAddrY := 8006 + (wNo - 1) * 10;
-                wAddrZ := 14006 + (wNo - 1) * 10;
-                wSpdAddrX := 2004 + (wNo - 1) * 10;
-                wSpdAddrY := 8004 + (wNo - 1) * 10;
-                wSpdAddrZ := 14004 + (wNo - 1) * 10;
-                dTargX_01um := REAL_TO_DINT(rTargX * 10000.0);
-                dTargY_01um := REAL_TO_DINT(rTargY * 10000.0);
-                dTargZ_01um := REAL_TO_DINT(rTargZ * 10000.0);
-                dSpdStg := REAL_TO_DINT(rSpd);
-                DTO(TRUE, dTargX_01um, H0, wAddrX, K2);
-                DTO(TRUE, dTargY_01um, H0, wAddrY, K2);
-                DTO(TRUE, dTargZ_01um, H0, wAddrZ, K2);
-                DTO(TRUE, dSpdStg, H0, wSpdAddrX, K2);
-                DTO(TRUE, dSpdStg, H0, wSpdAddrY, K2);
-                DTO(TRUE, dSpdStg, H0, wSpdAddrZ, K2);
-                TO(TRUE, wNo, H0, K1500, K1);
-                bFired := TRUE;
-                rLastX := rTargX; rLastY := rTargY; rLastZ := rTargZ;
-            END_IF;
-        END_IF;
-        IF bFired AND NOT bStartReq AND NOT bRunning THEN
-            IF X0 AND NOT XC AND NOT XD AND NOT XE AND NOT X4 THEN
-                (* NHIP 2: du dieu kien moi cho xung Y10 RUN *)
-                bStartReq := TRUE;
-            END_IF;
-        END_IF;
-        IF bRunning AND X14 THEN
-            rTargX := rPartX0 + (rEncDist - rPartE0) + (rBeltF * rLeadT) + rDxRot;
-            rTargZ := rZGlue;
-            rSpd := rDown;
-            wNo := (iCorner - 1) * 3 + 2;
-            bFired := FALSE; bRunning := FALSE;
-            rTmove := 0.0;
-            iState := 30;
-        ELSIF rTmove >= rTimeoutS THEN
-            bPosTimeout := TRUE;
-            bStartReq := FALSE;
-        END_IF;
-    30:
-        bValve := FALSE;
-        rTargX := rPartX0 + (rEncDist - rPartE0) + (rBeltF * rLeadT) + rDxRot;
-        rTargZ := rZGlue;
-        rTmove := rTmove + rDt;
-        IF NOT bFired THEN
-            IF X0 AND NOT X8 AND NOT X9 AND NOT XA THEN
-                (* NHIP 1: tinh + ghi toa do/van toc xuong QD75 - chua RUN *)
-                wAddrX := 2006 + (wNo - 1) * 10;
-                wAddrY := 8006 + (wNo - 1) * 10;
-                wAddrZ := 14006 + (wNo - 1) * 10;
-                wSpdAddrX := 2004 + (wNo - 1) * 10;
-                wSpdAddrY := 8004 + (wNo - 1) * 10;
-                wSpdAddrZ := 14004 + (wNo - 1) * 10;
-                dTargX_01um := REAL_TO_DINT(rTargX * 10000.0);
-                dTargY_01um := REAL_TO_DINT(rTargY * 10000.0);
-                dTargZ_01um := REAL_TO_DINT(rTargZ * 10000.0);
-                dSpdStg := REAL_TO_DINT(rSpd);
-                DTO(TRUE, dTargX_01um, H0, wAddrX, K2);
-                DTO(TRUE, dTargY_01um, H0, wAddrY, K2);
-                DTO(TRUE, dTargZ_01um, H0, wAddrZ, K2);
-                DTO(TRUE, dSpdStg, H0, wSpdAddrX, K2);
-                DTO(TRUE, dSpdStg, H0, wSpdAddrY, K2);
-                DTO(TRUE, dSpdStg, H0, wSpdAddrZ, K2);
-                TO(TRUE, wNo, H0, K1500, K1);
-                bFired := TRUE;
-                rLastX := rTargX; rLastY := rTargY; rLastZ := rTargZ;
-            END_IF;
-        END_IF;
-        IF bFired AND NOT bStartReq AND NOT bRunning THEN
-            IF X0 AND NOT XC AND NOT XD AND NOT XE AND NOT X4 THEN
-                (* NHIP 2: du dieu kien moi cho xung Y10 RUN *)
-                bStartReq := TRUE;
-            END_IF;
-        END_IF;
-        IF X4 AND (wMcode = 11) THEN
-            bValve := TRUE;
-            rTdwell := 0.0;
-            iState := 40;
-        ELSIF rTmove >= rTimeoutS THEN
-            bPosTimeout := TRUE;
-            bValve := FALSE;
-            bStartReq := FALSE;
-        END_IF;
-    40:
-        rTargX := rPartX0 + (rEncDist - rPartE0) + (rBeltF * rLeadT) + rDxRot;
-        rTargZ := rZGlue;
-        rTdwell := rTdwell + rDt;
-        IF rTdwell >= rDwellS THEN
-            bValve := FALSE;
-            bMOffReq := TRUE;
-            rTmove := 0.0;
-            iState := 45;
-        END_IF;
-    45:
-        rTmove := rTmove + rDt;
-        IF NOT X4 THEN
-            rTargX := rPartX0 + (rEncDist - rPartE0) + (rBeltF * rLeadT) + rDxRot;
-            rTargZ := rZTravel;
-            rSpd := rUp;
-            wNo := (iCorner - 1) * 3 + 3;
-            bFired := FALSE; bRunning := FALSE;
-            rTmove := 0.0;
-            iState := 50;
-        ELSIF rTmove >= rTimeoutS THEN
-            bPosTimeout := TRUE;
-            bStartReq := FALSE;
-        END_IF;
-    50:
-        bValve := FALSE;
-        rTargX := rPartX0 + (rEncDist - rPartE0) + (rBeltF * rLeadT) + rDxRot;
-        rTargZ := rZTravel;
-        rTmove := rTmove + rDt;
-        IF NOT bFired THEN
-            IF X0 AND NOT X8 AND NOT X9 AND NOT XA THEN
-                (* NHIP 1: tinh + ghi toa do/van toc xuong QD75 - chua RUN *)
-                wAddrX := 2006 + (wNo - 1) * 10;
-                wAddrY := 8006 + (wNo - 1) * 10;
-                wAddrZ := 14006 + (wNo - 1) * 10;
-                wSpdAddrX := 2004 + (wNo - 1) * 10;
-                wSpdAddrY := 8004 + (wNo - 1) * 10;
-                wSpdAddrZ := 14004 + (wNo - 1) * 10;
-                dTargX_01um := REAL_TO_DINT(rTargX * 10000.0);
-                dTargY_01um := REAL_TO_DINT(rTargY * 10000.0);
-                dTargZ_01um := REAL_TO_DINT(rTargZ * 10000.0);
-                dSpdStg := REAL_TO_DINT(rSpd);
-                DTO(TRUE, dTargX_01um, H0, wAddrX, K2);
-                DTO(TRUE, dTargY_01um, H0, wAddrY, K2);
-                DTO(TRUE, dTargZ_01um, H0, wAddrZ, K2);
-                DTO(TRUE, dSpdStg, H0, wSpdAddrX, K2);
-                DTO(TRUE, dSpdStg, H0, wSpdAddrY, K2);
-                DTO(TRUE, dSpdStg, H0, wSpdAddrZ, K2);
-                TO(TRUE, wNo, H0, K1500, K1);
-                bFired := TRUE;
-                rLastX := rTargX; rLastY := rTargY; rLastZ := rTargZ;
-            END_IF;
-        END_IF;
-        IF bFired AND NOT bStartReq AND NOT bRunning THEN
-            IF X0 AND NOT XC AND NOT XD AND NOT XE AND NOT X4 THEN
-                (* NHIP 2: du dieu kien moi cho xung Y10 RUN *)
-                bStartReq := TRUE;
-            END_IF;
-        END_IF;
-        IF X4 AND (wMcode = 10) THEN
-            bMOffReq := TRUE;
-            rTmove := 0.0;
-            iState := 55;
-        ELSIF rTmove >= rTimeoutS THEN
-            bPosTimeout := TRUE;
-            bStartReq := FALSE;
-        END_IF;
-    55:
-        rTmove := rTmove + rDt;
-        IF NOT X4 THEN
-            IF iCorner < 4 THEN
-                iCorner := iCorner + 1;
-                iState := 10;
-            ELSE
-                bActive := FALSE;
-                iState := 0;
-            END_IF;
-        ELSIF rTmove >= rTimeoutS THEN
-            bPosTimeout := TRUE;
-            bStartReq := FALSE;
-        END_IF;
-    ELSE
-        iState := 0;
-END_CASE;
-END_IF;
-(* 6. KEP BIEN mm *)
-IF rTargX < rXMin THEN rTargX := rXMin; END_IF;
-IF rTargX > rXMax THEN rTargX := rXMax; END_IF;
-IF rTargY < rYMin THEN rTargY := rYMin; END_IF;
-IF rTargY > rYMax THEN rTargY := rYMax; END_IF;
-IF rTargZ < 0.0 THEN rTargZ := 0.0; END_IF;
-IF rTargZ > 50.0 THEN rTargZ := 50.0; END_IF;
-
-(* 7. RA TAG 32-bit - := LA MOVE/DMOV *)
-dTargX_01um := REAL_TO_DINT(rTargX * 10000.0);
-dTargY_01um := REAL_TO_DINT(rTargY * 10000.0);
-dTargZ_01um := REAL_TO_DINT(rTargZ * 10000.0);
-wMotionType := 1;
-dStartX_01um := REAL_TO_DINT(rLastX * 10000.0);
-dStartY_01um := REAL_TO_DINT(rLastY * 10000.0);
-dStartZ_01um := REAL_TO_DINT(rLastZ * 10000.0);
-
-(* 7b. RA D CHO VC/WATCH - DMOV 32-bit RA CAP D (D1010 = D1010+D1011) *)
-DMOV(TRUE, dTargX_01um, D1010);
-DMOV(TRUE, dTargY_01um, D2010);
-DMOV(TRUE, dTargZ_01um, D3010);
-DMOV(TRUE, dStartX_01um, D1020);
-DMOV(TRUE, dStartY_01um, D2020);
-DMOV(TRUE, dStartZ_01um, D3020);
-DMOV(TRUE, dSpdStg, D4020);
-D4030 := wMotionType;
-M2000 := bValve;
-M3000 := bQFull;
-M3001 := bPosTimeout;
-
-(* 8. TAT M (Cd.7 U0\G1504) - QD75 tu clear G1504=0 sau khi X4 OFF, KHONG ghi K0 de *)
-IF bMOffReq THEN
-    wTmp := 1;
-    TO(TRUE, wTmp, H0, K1504, K1);
-    IF NOT X4 THEN
-        bMOffReq := FALSE;
-    END_IF;
-END_IF;
-Y10 := bStartReq AND X0 AND NOT X10;
-IF bStartReq AND X0 AND X10 THEN
-    bStartReq := FALSE;
-    bRunning := TRUE;
-END_IF;
-
-(* == BANG TAG LOCAL LABEL (paste tu o Class dong 1, Ctrl+V) == *)
-(* VAR bInit Bit (Co khoi tao) *)
-(* VAR bPrevTrig Bit (Nho xung M1000) *)
-(* VAR bPrevEn Bit (Nho canh len M500) *)
-(* VAR rEncDist FLOAT (Single Precision) (E mm) *)
-(* VAR rBelt FLOAT (Single Precision) (D4000) *)
-(* VAR rBeltF FLOAT (Single Precision) *)
-(* VAR rAlpha FLOAT 1.0 | rLeadT FLOAT 0.8 | rDt FLOAT 0.01 *)
-(* VAR rHalfSq 20 | rMoveS 1.0 | rDwellS 0.6 *)
-(* VAR rXMin 0 rXMax 170 rYMin 0 rYMax 170 rZTravel 10 rZGlue 40 *)
-(* VAR qPX/qPY/qPAng/qPE FLOAT(0..15) (FIFO 16) *)
-(* VAR iHead/iTail/iCnt Word[Signed] *)
-(* VAR bActive Bit | rPartX0/rPartY0/rPartAng/rPartE0 FLOAT *)
-(* VAR iState/iCorner Word[Signed] | rDx0/rDy0/rDxRot/rDyRot/rCosVal/rSinVal FLOAT *)
-(* VAR rTmove/rTdwell/rTargX/rTargY/rTargZ FLOAT *)
-(* VAR dTargX_01um Double Word D1010 | dTargY_01um D2010 | dTargZ_01um D3010 *)
-(* VAR bValve Bit M2000 | bQFull Bit M3000 *)
-(* VAR rTimeoutS 8.0 | bPosTimeout Bit M3001 *)
-(* VAR wNo/wAddrX/wAddrY/wAddrZ/wMcode/wTmp Word[Signed] *)
-(* VAR bStartReq/bFired/bRunning/bMOffReq Bit *)
-(* VAR rMaster/rSpdLim/rFly/rDown/rUp/rSpd FLOAT *)
-(* VAR dSpdStg Double Word D4020 | wSpdAddrX/wSpdAddrY/wSpdAddrZ Word *)
-(* VAR rLastX/rLastY/rLastZ FLOAT *)
-(* VAR dStartX_01um D1020 | dStartY_01um D2020 | dStartZ_01um D3020 (Double Word) *)
-(* VAR wMotionType Word D4030 (=1 thang) *)
-(* M500/M1000/Y0/X0/Y10/X10/X14/X4/XC/XD/XE/X8/X9/XA + D dung truc tiep, khong khai *)
+(* ================================================================= *) (* *)
+(* PROGRAM: Tracking - ST CHI TINH DIEM, goi FB: FB_Queue qua instance FB_Queue1 *) (* *)
+(* RANH GIỚI RÕ RÀNG THEO HỢP ĐỒNG TÁCH 2 PHẦN RIÊNG BIỆT *) (* *)
+(* PHẦN 1 - FB_QUEUE (BẠN VIẾT): CHỈ LƯU HÀNG ĐỢI TỌA ĐỘ + GÓC XOAY *) (* *)
+(* PHẦN 2 - FILE NÀY (ST): CHỈ TÍNH ĐIỂM MỤC TIÊU THEO CÔNG THỨC *) (* *)
+(* PHẦN ĐIỀU KHIỂN QD75 / XUNG KHỞI ĐỘNG / VAN KÉO DO NGƯỜI DÙNG TỰ VIẾT *) (* *)
+(* FILE NÀY KHÔNG CHẠM ĐIỀU KHIỂN, CHỈ RA ĐIỂM CHO PHẦN ĐÓ ĐỌC QUA BIẾN CHUNG *) (* *)
+(* ĐƠN VỊ CHUẨN: MM, MM/S, RADIAN, 0.1UM = MM NHÂN 10000.0 *) (* *)
+(* THỜI GIAN QUÉT DT = 0.01 S, THỜI GIAN ĐÓN ĐẦU MẶC ĐỊNH 0.8 S *) (* *)
+(* ĐẦU VÀO TRỰC TIẾP: M500 CHO PHÉP, M1000 XUNG CHỤP ẢNH, BPTDONE TỪ CHUYỂN ĐỘNG *) (* *)
+(* ĐỌC TRỰC TIẾP: D1000 X TÂM, D2000 Y TÂM, D4000 TỐC ĐỘ BĂNG, D4010 GÓC 0.1 ĐỘ *) (* *)
+(* ĐỌC TRỰC TIẾP: D3000 Z BAY, D3001 Z CHẤM KEO, D4002 MASTER, D4004 TRẦN TỐC ĐỘ *) (* *)
+(* ĐẦU RA CHO PHẦN SAU: ĐIỂM CUỐI D1010/D2010/D3010, ĐIỂM ĐẦU D1020/D2020/D3020 *) (* *)
+(* ĐẦU RA CHO PHẦN SAU: TỐC ĐỘ D4020, LOẠI CHUYỂN ĐỘNG D4030, ĐOẠN D4031, GÓC D4032 *) (* *)
+(* THỨ TỰ TRONG 1 SCAN: TÍNH LỆNH ĐẨY/LẤY TRƯỚC RỒI GỌI FB TRƯỚC, ĐỌC SAU *) (* *)
+(* CỤ THỂ: TÍNH RIN + BPOPREQ TỪ CỜ SCAN TRƯỚC RỒI GỌI FB_QUEUE1 RỒI MỚI ĐỌC *) (* *)
+(* KẾ TIẾP: CỘNG THƯỚC E RỒI NHẬN XUNG ĐIỂM RỒI SANG ĐOẠN RỒI XOAY RỒI RA ĐIỂM *) (* *)
+(* VÍ DỤ TAY V1: X0=25, Y0=85, V=6, GÓC=0, E=E0, ĐÓN 0.8 S, GÓC 1 (-20,-20) *) (* *)
+(* KẾT QUẢ V1: X=25+0+4.8-20=9.8 MM (98000), Y=85-20=65 MM (650000) ĐÃ KIỂM *) (* *)
+(* ================================================================= *) (* *)
+IF SM402 OR NOT bInit THEN (* Khởi tạo một lần sau khi chạy để xóa sạch trạng thái *) (* *)
+bInit := TRUE; (* Dựng cờ đã khởi tạo để chống chạy lại mỗi vòng quét *) (* *)
+bPrevEn := FALSE; (* Xóa nhớ cạnh của tín hiệu cho phép để bắt cạnh mới *) (* *)
+bPrevDone := FALSE; (* Xóa nhớ cạnh của tín hiệu tới điểm để bắt cạnh mới *) (* *)
+bPtPulse := FALSE; (* Tắt xung báo tới điểm dài đúng một vòng quét *) (* *)
+bPopReq := FALSE; (* Tắt lệnh lấy phôi khỏi hàng đợi ra để chờ điều kiện *) (* *)
+bActive := FALSE; (* Báo người máy đang rảnh chưa làm phôi nào cả *) (* *)
+bHasTarg := FALSE; (* Báo chưa có điểm mục tiêu cho phần chuyển động *) (* *)
+bSegInit := FALSE; (* Tắt xung chốt điểm đầu đoạn để chờ đổi đoạn mới *) (* *)
+bPrevActive := FALSE; (* Xóa nhớ cạnh đang làm phôi để phát hiện phôi mới *) (* *)
+bQFull := FALSE; (* Xóa cờ báo hàng đợi đầy để chờ trạng thái mới *) (* *)
+bQEmpty := TRUE; (* Đặt rỗng hàng ban đầu vì chưa đẩy phôi nào vào *) (* *)
+rEncDist := 0.0; (* Xóa thước dây quãng đường băng đã chạy về không *) (* *)
+rBelt := 0.0; (* Xóa tốc độ băng thô vừa đọc về không *) (* *)
+rBeltF := 0.0; (* Xóa tốc độ sau lọc trượt về không *) (* *)
+rAlpha := 1.0; (* Đặt hệ số lọc bằng một là lấy thẳng chưa lọc *) (* *)
+rDt := 0.01; (* Đặt chu kỳ quét bằng 0.01 giây tương ứng 10 mili giây *) (* *)
+rLeadT := 0.8; (* Đặt thời gian đón đầu bù trễ cơ khí là 0.8 giây *) (* *)
+rInX := 0.0; (* Xóa đệm X tâm chuẩn bị đẩy vào hàng đợi *) (* *)
+rInY := 0.0; (* Xóa đệm Y tâm chuẩn bị đẩy vào hàng đợi *) (* *)
+rInAng := 0.0; (* Xóa đệm góc xoay radian chuẩn bị đẩy vào hàng đợi *) (* *)
+rInE0 := 0.0; (* Xóa đệm mốc thước dây chuẩn bị đẩy vào hàng đợi *) (* *)
+rPartX0 := 0.0; (* Xóa X tâm lúc chụp của phôi đang làm *) (* *)
+rPartY0 := 0.0; (* Xóa Y tâm lúc chụp của phôi đang làm *) (* *)
+rPartAng := 0.0; (* Xóa góc xoay radian lúc chụp của phôi đang làm *) (* *)
+rPartE0 := 0.0; (* Xóa mốc thước dây lúc chụp của phôi đang làm *) (* *)
+iSeg := 0; (* Đặt đoạn bằng không là chưa có đoạn nào chạy *) (* *)
+iCorner := 1; (* Đặt góc đang tính về góc một để chờ phôi mới *) (* *)
+iPhase := 1; (* Đặt pha về một là pha bay trên đỉnh *) (* *)
+rLastX := 0.0; (* Xóa điểm đầu đoạn X để chờ chốt đoạn mới *) (* *)
+rLastY := 0.0; (* Xóa điểm đầu đoạn Y để chờ chốt đoạn mới *) (* *)
+rLastZ := 0.0; (* Xóa điểm đầu đoạn Z để chờ chốt đoạn mới *) (* *)
+rTargX := 0.0; (* Xóa điểm mục tiêu X để chờ tính mới *) (* *)
+rTargY := 0.0; (* Xóa điểm mục tiêu Y để chờ tính mới *) (* *)
+rTargZ := 0.0; (* Xóa điểm mục tiêu Z để chờ tính mới *) (* *)
+rSpd := 0.0; (* Xóa tốc độ theo pha để chờ tính mới *) (* *)
+dTargX_01um := 0; (* Xóa điểm cuối X đơn vị 0.1 um ra cặp thanh ghi *) (* *)
+dTargY_01um := 0; (* Xóa điểm cuối Y đơn vị 0.1 um ra cặp thanh ghi *) (* *)
+dTargZ_01um := 0; (* Xóa điểm cuối Z đơn vị 0.1 um ra cặp thanh ghi *) (* *)
+dStartX_01um := 0; (* Xóa điểm đầu X đơn vị 0.1 um ra cặp thanh ghi *) (* *)
+dStartY_01um := 0; (* Xóa điểm đầu Y đơn vị 0.1 um ra cặp thanh ghi *) (* *)
+dStartZ_01um := 0; (* Xóa điểm đầu Z đơn vị 0.1 um ra cặp thanh ghi *) (* *)
+dSpdStg := 0; (* Xóa tốc độ ra thanh ghi cho phần chuyển động đọc *) (* *)
+wMotionType := 0; (* Xóa loại chuyển động để chờ gán bằng một đường thẳng *) (* *)
+wSegMon := 0; (* Xóa đoạn giám sát ra thanh ghi cho màn hình đọc *) (* *)
+wCornerMon := 0; (* Xóa góc giám sát ra thanh ghi cho màn hình đọc *) (* *)
+END_IF; (* Kết thúc nhánh khởi tạo một lần sau khi chạy *) (* *)
+IF M500 AND NOT bPrevEn THEN (* Phát hiện cạnh lên của cho phép để bắt đầu mẻ mới *) (* *)
+rEncDist := 0.0; (* Xóa thước dây khi đổi mẻ để tránh lệch quãng đường *) (* *)
+rBelt := 0.0; (* Xóa tốc độ thô khi đổi mẻ để tránh vọt tốc ảo *) (* *)
+rBeltF := 0.0; (* Xóa tốc độ lọc khi đổi mẻ để bám tốc mới ngay *) (* *)
+bActive := FALSE; (* Thả phôi đang làm dở khi đổi mẻ để làm lại *) (* *)
+bHasTarg := FALSE; (* Tắt điểm mục tiêu khi đổi mẻ để chờ phôi mới *) (* *)
+bSegInit := FALSE; (* Tắt xung chốt đầu đoạn khi đổi mẻ để chờ đoạn mới *) (* *)
+bPrevActive := FALSE; (* Xóa nhớ đang làm khi đổi mẻ để mở đoạn một *) (* *)
+bPtPulse := FALSE; (* Tắt xung tới điểm khi đổi mẻ để chờ xung mới *) (* *)
+bPrevDone := FALSE; (* Xóa nhớ tới điểm khi đổi mẻ để bắt cạnh mới *) (* *)
+bPopReq := FALSE; (* Tắt lệnh lấy khi đổi mẻ để tính lại điều kiện *) (* *)
+bQEmpty := TRUE; (* Đặt ảnh rỗng khi đổi mẻ vì B_EN tắt mở xóa hàng *) (* *)
+iSeg := 0; (* Đưa đoạn về không khi đổi mẻ để chờ phôi mới *) (* *)
+iCorner := 1; (* Đưa góc về một khi đổi mẻ để tính từ góc một *) (* *)
+iPhase := 1; (* Đưa pha về bay khi đổi mẻ để chờ pha mới *) (* *)
+END_IF; (* Kết thúc nhánh cạnh lên của tín hiệu cho phép *) (* *)
+bPrevEn := M500; (* Cập nhật nhớ cho phép mỗi vòng để bắt cạnh sau *) (* *)
+IF NOT M500 THEN (* Dừng khẩn khi mất cho phép để chờ mẻ mới *) (* *)
+bActive := FALSE; (* Thả phôi đang làm khi mất cho phép để dừng bám *) (* *)
+bHasTarg := FALSE; (* Tắt điểm mục tiêu khi mất cho phép để dừng phát *) (* *)
+bSegInit := FALSE; (* Tắt xung chốt khi mất cho phép để giữ điểm cũ *) (* *)
+bPtPulse := FALSE; (* Tắt xung tới điểm khi mất cho phép để dừng sang đoạn *) (* *)
+bPopReq := FALSE; (* Tắt lệnh lấy khi mất cho phép vì hàng đã tự xóa *) (* *)
+bQEmpty := TRUE; (* Đặt ảnh rỗng khi dừng vì khối hàng đợi đã tự xóa *) (* *)
+bPrevDone := bPtDone; (* Cập nhật nhớ tới điểm khi dừng để chống nhảy cạnh *) (* *)
+iSeg := 0; (* Đưa đoạn về không khi dừng để chờ mẻ mới *) (* *)
+iCorner := 1; (* Đưa góc về một khi dừng để tính lại từ đầu *) (* *)
+iPhase := 1; (* Đưa pha về bay khi dừng để chờ pha mới *) (* *)
+END_IF; (* Kết thúc nhánh dừng khẩn khi mất cho phép *) (* *)
+IF M500 THEN (* Cộng thước dây mỗi vòng khi có cho phép để bám liên tục *) (* *)
+rBelt := INT_TO_REAL(D4000); (* Đọc tốc độ băng trực tiếp từ thanh ghi ra số thực *) (* *)
+rBeltF := rBeltF + ((rBelt - rBeltF) * rAlpha); (* Lọc trượt tốc độ để khử nhiễu đo băng *) (* *)
+rEncDist := rEncDist + (rBelt * rDt); (* Cộng dồn quãng đường bằng tốc nhân chu kỳ quét *) (* *)
+END_IF; (* Kết thúc nhánh cộng thước dây quãng đường băng *) (* *)
+rInX := INT_TO_REAL(D1000); (* Lấy X tâm lúc chụp từ thanh ghi vào đệm đẩy *) (* *)
+rInY := INT_TO_REAL(D2000); (* Lấy Y tâm lúc chụp từ thanh ghi vào đệm đẩy *) (* *)
+rInAng := (INT_TO_REAL(D4010) / 10.0) * 0.0174532925; (* Đổi góc 0.1 độ sang radian vào đệm đẩy *) (* *)
+rInE0 := rEncDist; (* Chốt mốc thước dây hiện tại vào đệm đẩy cùng mẫu *) (* *)
+IF M500 AND (NOT bActive) AND (NOT bQEmpty) THEN (* Xét rảnh còn phôi chờ thì xin lấy một phôi *) (* *)
+bPopReq := TRUE; (* Dựng lệnh lấy để gọi khối hàng đợi bật ra một phôi *) (* *)
+ELSE (* Ngược lại bận hoặc rỗng hàng thì không xin lấy thêm *) (* *)
+bPopReq := FALSE; (* Hạ lệnh lấy để khối hàng đợi giữ nguyên đầu hàng *) (* *)
+END_IF; (* Kết thúc nhánh tính lệnh lấy từ ảnh rỗng vòng trước *) (* *)
+FB_Queue1(B_EN:=M500, bPush:=M1000, bPop:=bPopReq, rPushX:=rInX, rPushY:=rInY, rPushAng:=rInAng, rPushE0:=rInE0); (* Gọi khối hàng đợi trước rồi mới đọc đầu ra phía sau *) (* *)
+bQFull := FB_Queue1.bFull; (* Sao chép cờ đầy hàng ra đèn báo cho màn hình *) (* *)
+bQEmpty := FB_Queue1.bEmpty; (* Chốt ảnh rỗng hàng để vòng sau tính lệnh lấy *) (* *)
+IF bPopReq AND FB_Queue1.bOk THEN (* Nhận biết lấy thành công nhờ lệnh lấy kèm báo tốt *) (* *)
+rPartX0 := FB_Queue1.rPopX; (* Chốt X tâm lúc chụp của phôi vừa bật ra *) (* *)
+rPartY0 := FB_Queue1.rPopY; (* Chốt Y tâm lúc chụp của phôi vừa bật ra *) (* *)
+rPartAng := FB_Queue1.rPopAng; (* Chốt góc xoay radian lúc chụp của phôi vừa bật ra *) (* *)
+rPartE0 := FB_Queue1.rPopE0; (* Chốt mốc thước dây lúc chụp của phôi vừa bật ra *) (* *)
+bActive := TRUE; (* Báo bắt đầu làm một phôi mới vừa lấy ra *) (* *)
+bHasTarg := TRUE; (* Mở điểm mục tiêu cho phôi mới để tính liên tục *) (* *)
+END_IF; (* Kết thúc nhánh chốt phôi mới khi lấy thành công *) (* *)
+IF M500 THEN (* Nhận xung tới điểm chỉ khi có cho phép để sang đoạn *) (* *)
+IF bPtDone AND NOT bPrevDone THEN (* Phát hiện cạnh lên của tới điểm từ chuyển động gửi sang *) (* *)
+bPtPulse := TRUE; (* Dựng xung dài một vòng để sang đoạn tiếp theo *) (* *)
+ELSE (* Giữ mức hoặc mức thấp thì không coi là tới điểm mới *) (* *)
+bPtPulse := FALSE; (* Hạ xung để mỗi lần tới chỉ sang đúng một đoạn *) (* *)
+END_IF; (* Kết thúc nhánh bắt cạnh lên của tín hiệu tới điểm *) (* *)
+bPrevDone := bPtDone; (* Cập nhật nhớ tới điểm mỗi vòng để bắt cạnh sau *) (* *)
+END_IF; (* Kết thúc nhánh nhận xung tới điểm khi có cho phép *) (* *)
+IF M500 AND (NOT bActive) AND FB_Queue1.bEmpty THEN (* Xét rảnh rỗi không phôi chờ thì chống tràn số thực *) (* *)
+rEncDist := 0.0; (* Đưa thước dây về không khi rỗi để số luôn gọn *) (* *)
+rBeltF := 0.0; (* Đưa tốc độ lọc về không khi rỗi để bám mới ngay *) (* *)
+END_IF; (* Kết thúc nhánh chống tràn số thực khi rỗi hoàn toàn *) (* *)
+IF NOT M500 THEN (* Giữ trạng thái chờ khi mất cho phép để khỏi nhảy đoạn *) (* *)
+bPrevActive := bActive; (* Cập nhật nhớ đang làm khi dừng để mở đoạn đúng *) (* *)
+ELSE (* Có cho phép thì chạy máy trạng thái đoạn một tới mười hai *) (* *)
+bSegInit := FALSE; (* Hạ xung chốt mặc định rồi chỉ dựng một vòng khi đổi đoạn *) (* *)
+IF bActive AND NOT bPrevActive THEN (* Phát hiện phôi mới vừa chốt thì mở đoạn một *) (* *)
+iSeg := 1; (* Mở đoạn một là bay trên góc một cho phôi mới *) (* *)
+iCorner := 1; (* Gán góc một cho đoạn một để chọn đúng đỉnh keo *) (* *)
+iPhase := 1; (* Gán pha bay cho đoạn một để đi nhanh trên đỉnh *) (* *)
+bHasTarg := TRUE; (* Giữ điểm mục tiêu cho đoạn một để tính ngay *) (* *)
+bSegInit := TRUE; (* Dựng xung chốt để lưu điểm đầu của đoạn một *) (* *)
+ELSIF bActive AND bPtPulse THEN (* Tới điểm khi đang làm thì sang đoạn kế tiếp *) (* *)
+IF (iSeg >= 1) AND (iSeg < 12) THEN (* Xét còn trong mười một đoạn đầu thì được sang tiếp *) (* *)
+iSeg := iSeg + 1; (* Tăng đoạn thêm một để sang đoạn kế tiếp *) (* *)
+IF iSeg <= 3 THEN (* Xét ba đoạn đầu thì thuộc về góc thứ nhất *) (* *)
+iCorner := 1; (* Gán góc một cho đoạn một tới ba để chọn đỉnh *) (* *)
+ELSIF iSeg <= 6 THEN (* Xét ba đoạn giữa đầu thì thuộc về góc thứ hai *) (* *)
+iCorner := 2; (* Gán góc hai cho đoạn bốn tới sáu để chọn đỉnh *) (* *)
+ELSIF iSeg <= 9 THEN (* Xét ba đoạn giữa cuối thì thuộc về góc thứ ba *) (* *)
+iCorner := 3; (* Gán góc ba cho đoạn bảy tới chín để chọn đỉnh *) (* *)
+ELSE (* Còn lại ba đoạn cuối thì thuộc về góc thứ tư *) (* *)
+iCorner := 4; (* Gán góc bốn cho đoạn mười tới mười hai để chọn đỉnh *) (* *)
+END_IF; (* Kết thúc nhánh chọn góc theo cụm ba đoạn liên tiếp *) (* *)
+iPhase := ((iSeg - 1) MOD 3) + 1; (* Đổi pha bay hạ nhấc theo dư của đoạn chia ba *) (* *)
+bHasTarg := TRUE; (* Giữ điểm mục tiêu cho đoạn mới để tính liên tục *) (* *)
+bSegInit := TRUE; (* Dựng xung chốt để lưu điểm đầu của đoạn mới *) (* *)
+ELSIF iSeg = 12 THEN (* Xong đoạn mười hai là xong phôi thì thả phôi *) (* *)
+bActive := FALSE; (* Thả phôi đã xong để chờ lấy phôi kế tiếp *) (* *)
+bHasTarg := FALSE; (* Tắt điểm mục tiêu khi xong phôi để giữ số cũ *) (* *)
+iSeg := 0; (* Đưa đoạn về không khi xong phôi để chờ mở mới *) (* *)
+iCorner := 1; (* Đưa góc về một khi xong phôi để tính lại từ đầu *) (* *)
+iPhase := 1; (* Đưa pha về bay khi xong phôi để chờ pha mới *) (* *)
+bSegInit := FALSE; (* Hạ xung chốt khi xong phôi vì không còn đoạn mới *) (* *)
+END_IF; (* Kết thúc nhánh tăng đoạn hoặc thả phôi khi xong *) (* *)
+ELSIF NOT bActive THEN (* Rỗi không làm phôi thì tắt điểm để giữ số cũ *) (* *)
+bHasTarg := FALSE; (* Tắt điểm mục tiêu khi rỗi để phần sau giữ nguyên *) (* *)
+iSeg := 0; (* Giữ đoạn bằng không khi rỗi để chờ phôi mới *) (* *)
+iCorner := 1; (* Giữ góc bằng một khi rỗi để tính lại từ đầu *) (* *)
+iPhase := 1; (* Giữ pha bay khi rỗi để mở đoạn một ngay *) (* *)
+END_IF; (* Kết thúc nhánh rỗi tắt điểm mục tiêu khi không làm *) (* *)
+bPrevActive := bActive; (* Cập nhật nhớ đang làm mỗi vòng để bắt phôi mới *) (* *)
+END_IF; (* Kết thúc máy trạng thái đoạn một tới mười hai *) (* *)
+IF D3000 > 0 THEN (* Xét đã nhập chiều cao bay thì đổi sang mili mét *) (* *)
+rZbay := INT_TO_REAL(D3000) / 10.0; (* Đổi Z bay 0.1 mi li mét sang mi li mét *) (* *)
+ELSE (* Chưa nhập chiều cao bay thì lấy mặc định an toàn *) (* *)
+rZbay := 10.0; (* Gán Z bay mặc định mười mi li mét cho khỏi quên *) (* *)
+END_IF; (* Kết thúc nhánh đọc chiều cao bay theo pha *) (* *)
+IF D3001 > 0 THEN (* Xét đã nhập chiều cao chấm thì đổi sang mili mét *) (* *)
+rZcham := INT_TO_REAL(D3001) / 10.0; (* Đổi Z chấm 0.1 mi li mét sang mi li mét *) (* *)
+ELSE (* Chưa nhập chiều cao chấm thì lấy mặc định an toàn *) (* *)
+rZcham := 40.0; (* Gán Z chấm mặc định bốn mươi mi li mét cho khỏi quên *) (* *)
+END_IF; (* Kết thúc nhánh đọc chiều cao chấm keo theo pha *) (* *)
+IF rZbay < 0.0 THEN (* Kẹp biên dưới cơ khí cho chiều cao bay khỏi âm *) (* *)
+rZbay := 0.0; (* Đưa Z bay về không khi nhập âm để khỏi lỗi *) (* *)
+END_IF; (* Kết thúc nhánh kẹp biên dưới của chiều cao bay *) (* *)
+IF rZbay > 50.0 THEN (* Kẹp biên trên cơ khí cho chiều cao bay khỏi quá *) (* *)
+rZbay := 50.0; (* Đưa Z bay về năm mươi khi nhập quá để an toàn *) (* *)
+END_IF; (* Kết thúc nhánh kẹp biên trên của chiều cao bay *) (* *)
+IF rZcham < 0.0 THEN (* Kẹp biên dưới cơ khí cho chiều cao chấm khỏi âm *) (* *)
+rZcham := 0.0; (* Đưa Z chấm về không khi nhập âm để khỏi lỗi *) (* *)
+END_IF; (* Kết thúc nhánh kẹp biên dưới của chiều cao chấm *) (* *)
+IF rZcham > 50.0 THEN (* Kẹp biên trên cơ khí cho chiều cao chấm khỏi quá *) (* *)
+rZcham := 50.0; (* Đưa Z chấm về năm mươi khi nhập quá để an toàn *) (* *)
+END_IF; (* Kết thúc nhánh kẹp biên trên của chiều cao chấm *) (* *)
+rMaster := INT_TO_REAL(D4002); (* Đọc tốc độ chủ từ thanh ghi vào biến tính pha *) (* *)
+IF rMaster <= 0.0 THEN (* Xét quên nhập tốc độ chủ thì lấy mặc định *) (* *)
+rMaster := 10000.0; (* Gán chủ mặc định mười nghìn cho khỏi đứng hình *) (* *)
+END_IF; (* Kết thúc nhánh mặc định tốc độ chủ khi quên nhập *) (* *)
+rSpdMax := INT_TO_REAL(D4004); (* Đọc trần tốc độ từ thanh ghi vào biến kẹp *) (* *)
+IF rSpdMax <= 0.0 THEN (* Xét quên nhập trần thì lấy mặc định theo trục *) (* *)
+rSpdMax := 20000.0; (* Gán trần mặc định hai mươi nghìn cho an toàn *) (* *)
+END_IF; (* Kết thúc nhánh mặc định trần tốc độ khi quên nhập *) (* *)
+IF rLeadT <= 0.0 THEN (* Xét thời gian đón đầu sai thì lấy mặc định *) (* *)
+rLeadT := 0.8; (* Gán đón đầu mặc định 0.8 giây bù trễ cơ khí *) (* *)
+END_IF; (* Kết thúc nhánh mặc định thời gian đón đầu theo băng *) (* *)
+IF bHasTarg THEN (* Có điểm mới tính liên tục mỗi vòng để bám băng *) (* *)
+CASE iCorner OF (* Chọn đỉnh vuông chưa xoay với nửa cạnh hai mươi *) (* *)
+1: (* Nhánh góc một là đỉnh trừ trừ phía sau trái *) (* *)
+rDx0 := 0.0 - 20.0; (* Gán lệch thô X góc một bằng trừ hai mươi *) (* *)
+rDy0 := 0.0 - 20.0; (* Gán lệch thô Y góc một bằng trừ hai mươi *) (* *)
+2: (* Nhánh góc hai là đỉnh cộng trừ phía sau phải *) (* *)
+rDx0 := 20.0; (* Gán lệch thô X góc hai bằng cộng hai mươi *) (* *)
+rDy0 := 0.0 - 20.0; (* Gán lệch thô Y góc hai bằng trừ hai mươi *) (* *)
+3: (* Nhánh góc ba là đỉnh cộng cộng phía trước phải *) (* *)
+rDx0 := 20.0; (* Gán lệch thô X góc ba bằng cộng hai mươi *) (* *)
+rDy0 := 20.0; (* Gán lệch thô Y góc ba bằng cộng hai mươi *) (* *)
+4: (* Nhánh góc bốn là đỉnh trừ cộng phía trước trái *) (* *)
+rDx0 := 0.0 - 20.0; (* Gán lệch thô X góc bốn bằng trừ hai mươi *) (* *)
+rDy0 := 20.0; (* Gán lệch thô Y góc bốn bằng cộng hai mươi *) (* *)
+ELSE (* Phòng góc lạ thì về góc một để khỏi kẹt tính *) (* *)
+rDx0 := 0.0 - 20.0; (* Gán lệch thô X mặc định bằng trừ hai mươi *) (* *)
+rDy0 := 0.0 - 20.0; (* Gán lệch thô Y mặc định bằng trừ hai mươi *) (* *)
+END_CASE; (* Kết thúc chọn đỉnh vuông chưa xoay theo góc *) (* *)
+COS_E(TRUE, rPartAng, rCosVal); (* Tính cô sin góc xoay theo đúng ba tham số *) (* *)
+SIN_E(TRUE, rPartAng, rSinVal); (* Tính sin góc xoay theo đúng ba tham số *) (* *)
+rDxRot := (rDx0 * rCosVal) - (rDy0 * rSinVal); (* Xoay lệch X bằng ma trận xoay phẳng chuẩn *) (* *)
+rDyRot := (rDx0 * rSinVal) + (rDy0 * rCosVal); (* Xoay lệch Y bằng ma trận xoay phẳng chuẩn *) (* *)
+rTargX := rPartX0 + (rEncDist - rPartE0) + (rBeltF * rLeadT) + rDxRot; (* Chốt X bằng tâm cộng trượt cộng đón cộng xoay *) (* *)
+rTargY := rPartY0 + rDyRot; (* Chốt Y bằng tâm cộng lệch xoay vì băng chỉ chạy X *) (* *)
+CASE iPhase OF (* Chọn cao độ và tốc độ theo pha bay hạ nhấc *) (* *)
+1: (* Nhánh pha bay trên đỉnh để di chuyển nhanh *) (* *)
+rTargZ := rZbay; (* Gán Z mục tiêu bằng cao độ bay cho pha bay *) (* *)
+rSpd := rMaster * 0.6; (* Gán tốc pha bay bằng sáu mươi phần trăm tốc chủ *) (* *)
+2: (* Nhánh pha hạ chấm keo để phun chính xác chậm *) (* *)
+rTargZ := rZcham; (* Gán Z mục tiêu bằng cao độ chấm cho pha hạ *) (* *)
+rSpd := rMaster * 0.12; (* Gán tốc pha hạ bằng mười hai phần trăm tốc chủ *) (* *)
+3: (* Nhánh pha nhấc lên sau chấm để rút kim nhanh *) (* *)
+rTargZ := rZbay; (* Gán Z mục tiêu bằng cao độ bay cho pha nhấc *) (* *)
+rSpd := rMaster * 0.3; (* Gán tốc pha nhấc bằng ba mươi phần trăm tốc chủ *) (* *)
+ELSE (* Phòng pha lạ thì về bay an toàn để khỏi cắm kim *) (* *)
+rTargZ := rZbay; (* Gán Z mục tiêu mặc định bằng cao độ bay an toàn *) (* *)
+rSpd := rMaster * 0.6; (* Gán tốc mặc định bằng sáu mươi phần trăm tốc chủ *) (* *)
+END_CASE; (* Kết thúc chọn cao độ và tốc độ theo pha *) (* *)
+IF rSpd > rSpdMax THEN (* Xét tốc vượt trần trục thì kẹp lại cho an toàn *) (* *)
+rSpd := rSpdMax; (* Gán tốc bằng trần khi vượt để bảo vệ cơ khí *) (* *)
+END_IF; (* Kết thúc nhánh kẹp trần tốc độ theo thông số trục *) (* *)
+IF rTargX < 0.0 THEN (* Kẹp biên dưới X để khỏi chạy quá hành trình *) (* *)
+rTargX := 0.0; (* Đưa X về không khi tính âm để giữ trong bàn *) (* *)
+END_IF; (* Kết thúc nhánh kẹp biên dưới của mục tiêu X *) (* *)
+IF rTargX > 170.0 THEN (* Kẹp biên trên X để khỏi chạy quá hành trình *) (* *)
+rTargX := 170.0; (* Đưa X về một bảy mươi khi tính quá để giữ bàn *) (* *)
+END_IF; (* Kết thúc nhánh kẹp biên trên của mục tiêu X *) (* *)
+IF rTargY < 0.0 THEN (* Kẹp biên dưới Y để khỏi chạy quá hành trình *) (* *)
+rTargY := 0.0; (* Đưa Y về không khi tính âm để giữ trong bàn *) (* *)
+END_IF; (* Kết thúc nhánh kẹp biên dưới của mục tiêu Y *) (* *)
+IF rTargY > 170.0 THEN (* Kẹp biên trên Y để khỏi chạy quá hành trình *) (* *)
+rTargY := 170.0; (* Đưa Y về một bảy mươi khi tính quá để giữ bàn *) (* *)
+END_IF; (* Kết thúc nhánh kẹp biên trên của mục tiêu Y *) (* *)
+IF rTargZ < 0.0 THEN (* Kẹp biên dưới Z để khỏi đâm xuống dưới bàn *) (* *)
+rTargZ := 0.0; (* Đưa Z về không khi tính âm để bảo vệ kim keo *) (* *)
+END_IF; (* Kết thúc nhánh kẹp biên dưới của mục tiêu Z *) (* *)
+IF rTargZ > 50.0 THEN (* Kẹp biên trên Z để khỏi nhấc quá hành trình đứng *) (* *)
+rTargZ := 50.0; (* Đưa Z về năm mươi khi tính quá để giữ trục đứng *) (* *)
+END_IF; (* Kết thúc nhánh kẹp biên trên của mục tiêu Z *) (* *)
+IF bSegInit THEN (* Đầu đoạn mới thì chốt điểm đầu cho véc tơ chạy *) (* *)
+rLastX := rTargX; (* Lưu X mục tiêu hiện tại làm điểm đầu của đoạn *) (* *)
+rLastY := rTargY; (* Lưu Y mục tiêu hiện tại làm điểm đầu của đoạn *) (* *)
+rLastZ := rTargZ; (* Lưu Z mục tiêu hiện tại làm điểm đầu của đoạn *) (* *)
+END_IF; (* Kết thúc nhánh chốt điểm đầu khi đổi đoạn mới *) (* *)
+dTargX_01um := REAL_TO_DINT(rTargX * 10000.0); (* Đổi X cuối sang 0.1 um ra cặp D1010 *) (* *)
+dTargY_01um := REAL_TO_DINT(rTargY * 10000.0); (* Đổi Y cuối sang 0.1 um ra cặp D2010 *) (* *)
+dTargZ_01um := REAL_TO_DINT(rTargZ * 10000.0); (* Đổi Z cuối sang 0.1 um ra cặp D3010 *) (* *)
+dStartX_01um := REAL_TO_DINT(rLastX * 10000.0); (* Đổi X đầu sang 0.1 um ra cặp D1020 *) (* *)
+dStartY_01um := REAL_TO_DINT(rLastY * 10000.0); (* Đổi Y đầu sang 0.1 um ra cặp D2020 *) (* *)
+dStartZ_01um := REAL_TO_DINT(rLastZ * 10000.0); (* Đổi Z đầu sang 0.1 um ra cặp D3020 *) (* *)
+dSpdStg := REAL_TO_DINT(rSpd); (* Đổi tốc độ theo pha ra thanh ghi D4020 chờ đọc *) (* *)
+wMotionType := 1; (* Gán loại thẳng bằng một ra thanh ghi D4030 chờ đọc *) (* *)
+wSegMon := iSeg; (* Sao chép đoạn đang chạy ra thanh ghi D4031 để giám sát *) (* *)
+wCornerMon := iCorner; (* Sao chép góc đang chạy ra thanh ghi D4032 để giám sát *) (* *)
+END_IF; (* Kết thúc nhánh tính mục tiêu liên tục khi có phôi *) (* *)
+(* LADDER NGOAI ST - TAO RIENG 11 RUNG DE RA D VA CO CHO MOTION DOC *) (* *)
+(* DMOV dTargX_01um D1010 - Chuyen X cuoi 32-bit ra cap D1010-D1011 *) (* *)
+(* DMOV dTargY_01um D2010 - Chuyen Y cuoi 32-bit ra cap D2010-D2011 *) (* *)
+(* DMOV dTargZ_01um D3010 - Chuyen Z cuoi 32-bit ra cap D3010-D3011 *) (* *)
+(* DMOV dStartX_01um D1020 - Chuyen X dau 32-bit ra cap D1020-D1021 *) (* *)
+(* DMOV dStartY_01um D2020 - Chuyen Y dau 32-bit ra cap D2020-D2021 *) (* *)
+(* DMOV dStartZ_01um D3020 - Chuyen Z dau 32-bit ra cap D3020-D3021 *) (* *)
+(* DMOV dSpdStg D4020 - Chuyen toc do 32-bit ra cap D4020-D4021 *) (* *)
+(* MOV wMotionType D4030 - Chuyen loai thang ra D4030 cho motion doc *) (* *)
+(* MOV wSegMon D4031 - Chuyen doan dang chay ra D4031 de giam sat *) (* *)
+(* MOV wCornerMon D4032 - Chuyen goc dang chay ra D4032 de giam sat *) (* *)
+(* OUT bQFull M3000 - Xuat co bao day hang ra role M3000 cho den bao *) (* *)
+(* == LOCAL LABEL TAGS - copy cac dong VAR ben trong, khong lay dau comment, paste vao GX Works2 Local Label tu cot Class 1 == *)
+(* VAR	bInit	Bit			INIT SM402 *)
+(* VAR	bPrevEn	Bit			Nhớ cạnh M500 *)
+(* VAR	bPrevDone	Bit			Nhớ cạnh bPtDone *)
+(* VAR	bPtDone	Bit			Vào từ motion *)
+(* VAR	bPtPulse	Bit			Xung 1 scan tới điểm *)
+(* VAR	bPopReq	Bit			Lệnh lấy gửi vào bPop FB *)
+(* VAR	bQEmpty	Bit			Ảnh rỗng FB vòng trước *)
+(* VAR	bActive	Bit			Đang làm 1 phôi *)
+(* VAR	bHasTarg	Bit			Có target *)
+(* VAR	bSegInit	Bit			Xung đổi đoạn *)
+(* VAR	bPrevActive	Bit			Nhớ cạnh active *)
+(* VAR	bQFull	Bit		M3000	Báo FB đầy *)
+(* VAR	rEncDist	FLOAT (Single Precision)			Thước E mm *)
+(* VAR	rBelt	FLOAT (Single Precision)			V live mm/s *)
+(* VAR	rBeltF	FLOAT (Single Precision)			V lọc mm/s *)
+(* VAR	rAlpha	FLOAT (Single Precision)			=1.0 *)
+(* VAR	rDt	FLOAT (Single Precision)			=0.01 *)
+(* VAR	rLeadT	FLOAT (Single Precision)			=0.8 đón đầu *)
+(* VAR	rInX	FLOAT (Single Precision)			Đệm X đẩy mm *)
+(* VAR	rInY	FLOAT (Single Precision)			Đệm Y đẩy mm *)
+(* VAR	rInAng	FLOAT (Single Precision)			Đệm góc đẩy rad *)
+(* VAR	rInE0	FLOAT (Single Precision)			Đệm mốc E đẩy mm *)
+(* VAR	rPartX0	FLOAT (Single Precision)			X0 mm *)
+(* VAR	rPartY0	FLOAT (Single Precision)			Y0 mm *)
+(* VAR	rPartAng	FLOAT (Single Precision)			Góc rad *)
+(* VAR	rPartE0	FLOAT (Single Precision)			E0 mm *)
+(* VAR	iSeg	Word[Signed]			Đoạn 1..12 *)
+(* VAR	iCorner	Word[Signed]			Góc 1..4 *)
+(* VAR	iPhase	Word[Signed]			Pha 1/2/3 *)
+(* VAR	rZbay	FLOAT (Single Precision)			Z bay mm *)
+(* VAR	rZcham	FLOAT (Single Precision)			Z chấm mm *)
+(* VAR	rMaster	FLOAT (Single Precision)			Master D4002 *)
+(* VAR	rSpdMax	FLOAT (Single Precision)			Trần D4004 *)
+(* VAR	rDx0	FLOAT (Single Precision)			Offset thô X *)
+(* VAR	rDy0	FLOAT (Single Precision)			Offset thô Y *)
+(* VAR	rCosVal	FLOAT (Single Precision)			COS 3 ts *)
+(* VAR	rSinVal	FLOAT (Single Precision)			SIN 3 ts *)
+(* VAR	rDxRot	FLOAT (Single Precision)			Offset xoay X *)
+(* VAR	rDyRot	FLOAT (Single Precision)			Offset xoay Y *)
+(* VAR	rTargX	FLOAT (Single Precision)			Target X mm *)
+(* VAR	rTargY	FLOAT (Single Precision)			Target Y mm *)
+(* VAR	rTargZ	FLOAT (Single Precision)			Target Z mm *)
+(* VAR	rSpd	FLOAT (Single Precision)			Tốc độ theo pha *)
+(* VAR	rLastX	FLOAT (Single Precision)			Đầu đoạn X *)
+(* VAR	rLastY	FLOAT (Single Precision)			Đầu đoạn Y *)
+(* VAR	rLastZ	FLOAT (Single Precision)			Đầu đoạn Z *)
+(* VAR	dTargX_01um	Double Word[Signed]		D1010	X cuối 0.1um *)
+(* VAR	dTargY_01um	Double Word[Signed]		D2010	Y cuối 0.1um *)
+(* VAR	dTargZ_01um	Double Word[Signed]		D3010	Z cuối 0.1um *)
+(* VAR	dStartX_01um	Double Word[Signed]		D1020	X đầu 0.1um *)
+(* VAR	dStartY_01um	Double Word[Signed]		D2020	Y đầu 0.1um *)
+(* VAR	dStartZ_01um	Double Word[Signed]		D3020	Z đầu 0.1um *)
+(* VAR	dSpdStg	Double Word[Signed]		D4020	Tốc độ *)
+(* VAR	wMotionType	Word[Signed]		D4030	=1 thẳng *)
+(* VAR	wSegMon	Word[Signed]		D4031	Đoạn 1..12 *)
+(* VAR	wCornerMon	Word[Signed]		D4032	Góc 1..4 *)
+(* VAR	FB_Queue1	FB_Queue			Instance hàng đợi *)
+(* M500/M1000/D1000/D2000/D4000/D4010/D3000/D3001/D4002/D4004 dùng trực tiếp, không khai *)
+(* LADDER NGOAI ST: Ladder ngoài ST 11 rung: DMOV dTarg* ra D1010/D2010/D3010, DMOV dStart* ra D1020/D2020/D3020, DMOV dSpdStg ra D4020, MOV wMotionType ra D4030, MOV wSegMon ra D4031, MOV wCornerMon ra D4032, OUT bQFull ra M3000 *)
